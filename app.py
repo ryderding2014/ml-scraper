@@ -921,6 +921,28 @@ async def api_scrape(payload: ScrapeRequest):
                     if not v:
                         continue
 
+                    # --- 行业相关性检查 ---
+                    atividade = (v.get("atividade_principal") or "").lower()
+                    razao_lower = (v.get("razao_social") or "").lower()
+                    combined_text = atividade + " " + razao_lower
+
+                    # 不相关行业关键词 — 直接排除或大幅降分
+                    irrelevant_keywords = [
+                        "alimento", "restaurante", "lanchonete", "bebida", "padaria",
+                        "açougue", "hortifruti", "supermercado", "mercearia",
+                        "farmacia", "medicamento", "hospital", "clinica",
+                        "combustivel", "posto de gasolina", "lubrificante",
+                        "construcao civil", "incorporacao", "empreendimento imobiliario",
+                        "transporte rodoviario de carga", "transportes",
+                        "igreja", "templo", "partido politico",
+                        "agricola", "agropecuaria", "pecuaria",
+                        "servico de pintura", "servico de limpeza",
+                    ]
+                    is_irrelevant = any(kw in combined_text for kw in irrelevant_keywords)
+                    if is_irrelevant:
+                        logger.info(f"  候选 {cand['cnpj']}: 行业不相关，跳过 ({atividade[:80]})")
+                        continue
+
                     # 评分：对比 ML 卖家名和 Brasil API 返回的 nome_fantasia / razao_social
                     ml_norm = re.sub(r'[^a-z0-9]', '', seller_name.lower())
                     fantasia = (v.get("nome_fantasia") or "").lower()
