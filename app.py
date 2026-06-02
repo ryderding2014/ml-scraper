@@ -834,6 +834,51 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/debug")
+async def debug():
+    """诊断接口：测试 Playwright 是否能正常启动"""
+    import traceback as _tb
+    result = {}
+
+    result["python"] = __import__("sys").version
+    result["platform"] = __import__("sys").platform
+
+    try:
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        result["pw_start"] = "ok"
+
+        try:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox"],
+            )
+            result["chromium_launch"] = "ok"
+            result["chromium_version"] = browser.version
+
+            page = await browser.new_page()
+            await page.goto("https://httpbin.org/ip", wait_until="domcontentloaded", timeout=15000)
+            body = await page.evaluate("document.body.innerText")
+            result["test_page"] = body[:200]
+            await browser.close()
+            result["status"] = "fully_working"
+        except Exception as e:
+            result["error"] = str(e)[:300]
+            result["traceback"] = _tb.format_exc()[-800:]
+
+        await pw.stop()
+    except Exception as e:
+        result["pw_error"] = str(e)[:300]
+        result["traceback"] = _tb.format_exc()[-800:]
+
+    import shutil as _shutil
+    usage = _shutil.disk_usage("/tmp") if __import__("os").path.exists("/tmp") else None
+    if usage:
+        result["disk_free_mb"] = usage.free // (1024 * 1024)
+
+    return result
+
+
 @app.post("/api/scrape")
 async def api_scrape(payload: ScrapeRequest):
     # --- 解析 URL ---
