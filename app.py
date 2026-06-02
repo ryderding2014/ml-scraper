@@ -40,6 +40,10 @@ PAGE_SETTLE_MS = 2_500
 CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
+# 按 seller_id 缓存 CNPJ 查询结果（避免重复查询同一个卖家）
+# 格式: {seller_id: {"cnpj": ..., "razao_social": ..., ...}}
+_seller_cache: dict = {}
+
 
 class ScrapeRequest(BaseModel):
     url: str = Field(..., min_length=10)
@@ -889,14 +893,23 @@ async def api_scrape(payload: ScrapeRequest):
             data = await _scrape_profile_page(page, identifier, payload.url)
 
         seller_name = data.get("seller_name") or ""
+        is_alias = False
         logger.info(f"第一步完成: 卖家名 = {seller_name}")
 
         # ====== 第二步：Google 搜索反查 CNPJ + 联系方式 ======
         legal_info = {"cnpj": None, "razao_social": None, "source": None}
         contacts = {}
         verified = None
+        seller_id = data.get("seller_id")
 
-        # 验证 seller_name 是否合法（排除 404 页面标题等）
+        # 先查缓存（同一个 seller_id 可能是不同产品/不同卖家名）
+        if seller_id and seller_id in _seller_cache:
+            cached = _seller_cache[seller_id]
+            logger.info(f"命中缓存: seller_id={seller_id}, CNPJ={cached.get('cnpj')}")
+            legal_info.update(cached)
+            legal_info["source"] = "缓存（相同卖家ID）"
+
+        # 验证 seller_name 是否合法
         invalid_names = ("not found", "não existe", "nao existe", "parece que")
         is_valid_name = bool(
             seller_name
@@ -904,7 +917,16 @@ async def api_scrape(payload: ScrapeRequest):
             and not any(kw in seller_name.lower() for kw in invalid_names)
         )
 
-        if is_valid_name:
+        # 检查是否为马甲名（全小写、无空格、纯字母、不含 LTDA/SA 等后缀）
+        is_alias = bool(
+            seller_name
+            and seller_name == seller_name.lower()  # 全小写
+            and " " not in seller_name               # 无空格
+            and not any(suffix in seller_name.lower()
+                        for suffix in ["ltda", "s.a", "s/a", "eireli", "mei", "comercio", "import", "distribu"])
+        )
+
+        if is_valid_name and not is_alias:
             google_result = await _google_search_cnpj(page, seller_name)
 
             candidates = google_result.get("candidates", [])
@@ -1034,7 +1056,12 @@ async def api_scrape(payload: ScrapeRequest):
         data["legal_info"] = legal_info
         data["contacts"] = contacts
         if not legal_info.get("cnpj"):
-            if not is_valid_name:
+            if is_alias:
+                data["legal_info"]["note"] = (
+                    f"卖家名 '{seller_name}' 是店铺马甲名（非公司注册名），无法通过 Google 准确匹配 CNPJ。"
+                    "请尝试用 _CustId_ 链接查询该卖家的其他商品，或手动提供公司名。"
+                )
+            elif not is_valid_name:
                 data["legal_info"]["note"] = "未能获取到有效的卖家名称，无法进行 CNPJ 反查。"
             elif legal_info.get("note"):
                 pass  # 已在上面设置（如不匹配丢弃的情况）
