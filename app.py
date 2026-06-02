@@ -35,8 +35,8 @@ logger = logging.getLogger("ml-scraper")
 app = FastAPI(title="ML Seller Snapshot + CNPJ")
 templates = Jinja2Templates(directory="templates")
 
-PAGE_TIMEOUT_MS = 30_000
-PAGE_SETTLE_MS = 4_000
+PAGE_TIMEOUT_MS = 20_000
+PAGE_SETTLE_MS = 2_500
 CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
@@ -486,18 +486,12 @@ async def _google_search_cnpj(page, seller_name: str) -> dict:
 
     logger.info(f"Google 搜索: {query}")
     try:
-        await page.goto(search_url, wait_until="networkidle", timeout=25000)
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=12000)
     except PlaywrightTimeout:
         logger.warning("Google 搜索超时")
         return {}
 
-    await page.wait_for_timeout(3000)
-
-    # 检查是否被 Google 拦截
-    block = await _detect_block(page)
-    if block:
-        logger.warning(f"Google 搜索被拦截: {block}")
-        return {}
+    await page.wait_for_timeout(2000)
 
     body = await page.evaluate("document.body.innerText")
     if not body or len(body) < 100:
@@ -585,14 +579,14 @@ async def _google_search_contacts(page, seller_name: str, razao_social: str = ""
     all_domains = []
     all_emails = []
 
-    for query in search_queries[:2]:  # 最多搜 2 次，避免太慢
+    for query in search_queries[:1]:  # 只搜 1 次，节省时间
         search_url = f"https://www.google.com/search?q={quote(query)}&hl=pt-BR"
         logger.info(f"Google 搜索联系方式: {query}")
         try:
-            await page.goto(search_url, wait_until="networkidle", timeout=20000)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=10000)
         except PlaywrightTimeout:
             continue
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(2000)
 
         body = await page.evaluate("document.body.innerText")
 
@@ -750,7 +744,7 @@ async def _verify_cnpj_via_brasilapi(page, cnpj_raw: str) -> Optional[dict]:
 
     logger.info(f"验证 CNPJ: {api_url}")
     try:
-        await page.goto(api_url, wait_until="domcontentloaded", timeout=15000)
+        await page.goto(api_url, wait_until="domcontentloaded", timeout=8000)
         body = await page.evaluate("document.body.innerText")
 
         # 尝试解析 JSON
@@ -954,19 +948,10 @@ async def api_scrape(payload: ScrapeRequest):
                     legal_info["email"] = verified.get("email")
                     legal_info["verified"] = True
 
-                # ====== 第四步：Google 搜索官网和社交链接 ======
+                # ====== 第四步：官网/联系（轻量模式，只搜一次）======
                 razao = legal_info.get("razao_social", "")
                 contacts = await _google_search_contacts(page, seller_name, razao)
-
-                # ====== 第五步：验证官网是否存活 ======
-                if contacts.get("website"):
-                    site_verify = await _verify_website(page, contacts["website"], seller_name)
-                    contacts["website_verified"] = site_verify
-                    # 如果验证不匹配，尝试下一个候选
-                    if not site_verify.get("verified") and contacts.get("website_confidence") != "确认":
-                        logger.info(f"官网验证失败({contacts['website']})，清除")
-                        contacts["website"] = None
-                        contacts["website_confidence"] = "无官网"
+                # 跳过官网验证节省 ~5s
 
         # 拼装最终数据
         data["legal_info"] = legal_info
