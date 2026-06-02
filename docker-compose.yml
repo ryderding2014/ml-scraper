@@ -1,0 +1,18 @@
+services:
+  ml-scraper:
+    build: .
+    ports:
+      - "${PORT:-8080}:8000"
+    environment:
+      - PORT=8000
+      - HOST=0.0.0.0
+      - RELOAD=0
+    restart: unless-stopped
+    # Chromium 需要共享内存空间
+    shm_size: "1gb"
+    # 可选：挂载持久化目录（浏览器 profile 缓存）
+    volumes:
+      - browser-data:/tmp/ml-scraper-profile
+
+volumes:
+  browser-data:

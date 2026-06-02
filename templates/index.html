@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ML 卖家快照</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse-dot {
+            0%, 80%, 100% { opacity: 0; }
+            40% { opacity: 1; }
+        }
+        .dot-pulse { animation: pulse-dot 1.4s infinite both; }
+        .dot-pulse:nth-child(2) { animation-delay: 0.2s; }
+        .dot-pulse:nth-child(3) { animation-delay: 0.4s; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<header class="bg-white border-b border-gray-200">
+    <div class="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
+        <span class="text-xl">📦</span>
+        <div>
+            <h1 class="text-base font-bold text-gray-900">Mercado Livre 卖家信息快照</h1>
+            <p class="text-xs text-gray-400">输入链接，查询 CNPJ · 公司名 · 联系方式</p>
+        </div>
+    </div>
+</header>
+
+<main class="max-w-2xl mx-auto px-4 py-5">
+
+    <!-- 输入区域 -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-5">
+        <div class="flex gap-2">
+            <input id="urlInput" type="url" placeholder="粘贴 Mercado Livre 链接..."
+                class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            <button id="searchBtn"
+                class="px-5 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all">
+                查询
+            </button>
+        </div>
+    </div>
+
+    <!-- ============ 加载面板 ============ -->
+    <div id="loading" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 border-3 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <div>
+                    <p id="stageText" class="text-sm font-semibold text-gray-800">正在连接 Mercado Livre...</p>
+                    <p class="text-xs text-gray-400 mt-0.5">
+                        已等待 <span id="elapsedSec" class="font-mono text-blue-600">0</span> 秒
+                        <span id="loadingDots">
+                            <span class="dot-pulse">.</span>
+                            <span class="dot-pulse">.</span>
+                            <span class="dot-pulse">.</span>
+                        </span>
+                    </p>
+                </div>
+            </div>
+            <button id="cancelBtn" class="px-3 py-1.5 text-xs text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                取消
+            </button>
+        </div>
+        <div class="w-full bg-gray-100 rounded-full h-1.5">
+            <div id="progressBar" class="bg-blue-600 h-1.5 rounded-full transition-all duration-1000" style="width:0%"></div>
+        </div>
+    </div>
+
+    <!-- ============ 结果容器 ============ -->
+    <div id="resultContainer" class="hidden">
+
+        <!-- 错误 -->
+        <div id="cardError" class="hidden bg-white rounded-xl shadow-sm border border-red-200 p-5">
+            <div class="flex gap-3">
+                <span class="text-lg shrink-0">⚠️</span>
+                <div><h3 class="text-sm font-semibold text-red-800">查询失败</h3>
+                <p id="errorMsg" class="mt-1 text-sm text-red-600"></p></div>
+            </div>
+        </div>
+
+        <!-- 卖家快照 -->
+        <div id="cardSuccess" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+
+            <!-- 头部：名称 + 信誉 -->
+            <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                <div>
+                    <h2 id="sellerName" class="text-lg font-bold text-gray-900"></h2>
+                    <p id="sourceTag" class="text-xs text-gray-400 mt-0.5"></p>
+                </div>
+                <span id="reputationBadge" class="hidden px-3 py-1 rounded-full text-xs font-bold"></span>
+            </div>
+
+            <!-- 核心数据 -->
+            <div class="px-5 py-4 grid grid-cols-3 gap-3 text-center">
+                <div><div id="statSales" class="text-xl font-bold text-gray-900">-</div><div class="text-xs text-gray-400 mt-1">销量</div></div>
+                <div><div id="statFollowers" class="text-xl font-bold text-gray-900">-</div><div class="text-xs text-gray-400 mt-1">粉丝</div></div>
+                <div><div id="statProducts" class="text-xl font-bold text-gray-900">-</div><div class="text-xs text-gray-400 mt-1">产品</div></div>
+            </div>
+
+            <!-- 服务 -->
+            <div id="serviceRow" class="hidden px-5 py-3 border-t border-gray-100 flex gap-3">
+                <span id="serviceBadge" class="hidden text-sm text-green-700 bg-green-50 px-2.5 py-1 rounded-full">✅ <span id="serviceText"></span></span>
+                <span id="deliveryBadge" class="hidden text-sm text-green-700 bg-green-50 px-2.5 py-1 rounded-full">🚚 <span id="deliveryText"></span></span>
+            </div>
+
+            <!-- 企业注册信息 -->
+            <div class="px-5 py-4 border-t border-gray-100">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">企业注册信息</h3>
+                <div id="legalAvailable" class="hidden">
+                    <div class="grid grid-cols-2 gap-3 text-sm">
+                        <div><span class="text-xs text-gray-400">Razao Social</span><p id="razaoSocial" class="font-medium text-gray-900 mt-0.5"></p></div>
+                        <div><span class="text-xs text-gray-400">CNPJ</span><p id="cnpj" class="font-medium text-gray-900 font-mono mt-0.5"></p></div>
+                        <div id="fantasiaRow" class="hidden"><span class="text-xs text-gray-400">Nome Fantasia</span><p id="nomeFantasia" class="font-medium text-gray-900 mt-0.5"></p></div>
+                        <div id="situacaoRow" class="hidden"><span class="text-xs text-gray-400">Situacao</span><p id="situacaoCadastral" class="font-medium mt-0.5"></p></div>
+                        <div id="cidadeRow" class="hidden"><span class="text-xs text-gray-400">Localizacao</span><p id="cidadeEstado" class="font-medium text-gray-900 mt-0.5"></p></div>
+                        <div id="aberturaRow" class="hidden"><span class="text-xs text-gray-400">Data Abertura</span><p id="dataAbertura" class="font-medium text-gray-900 mt-0.5"></p></div>
+                        <div id="atividadeRow" class="hidden col-span-2"><span class="text-xs text-gray-400">Atividade Principal</span><p id="atividadePrincipal" class="font-medium text-gray-900 mt-0.5"></p></div>
+                    </div>
+                    <p id="legalNote" class="text-xs text-gray-400 mt-3"></p>
+                </div>
+                <div id="legalUnavailable" class="hidden">
+                    <p class="text-sm text-amber-700 bg-amber-50 rounded-lg px-3 py-2">未找到该卖家的 CNPJ / Razao Social。</p>
+                </div>
+            </div>
+
+            <!-- 联系方式 -->
+            <div id="contactSection" class="hidden px-5 py-4 border-t border-gray-100">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">联系方式</h3>
+                <div class="space-y-2 text-sm">
+                    <div id="cWebsite" class="hidden flex items-center gap-2"><span class="text-gray-400 w-14 shrink-0">官网</span><a id="websiteLink" href="#" target="_blank" class="truncate"></a></div>
+                    <div id="cEmail" class="hidden flex items-center gap-2"><span class="text-gray-400 w-14 shrink-0">Email</span><span id="emailText" class="text-gray-900"></span></div>
+                    <div id="cPhone" class="hidden flex items-center gap-2"><span class="text-gray-400 w-14 shrink-0">电话</span><span id="phoneText" class="text-gray-900"></span></div>
+                    <div id="cInstagram" class="hidden flex items-center gap-2"><span class="text-gray-400 w-14 shrink-0">Instagram</span><a id="instagramLink" href="#" target="_blank"></a></div>
+                    <div id="cFacebook" class="hidden flex items-center gap-2"><span class="text-gray-400 w-14 shrink-0">Facebook</span><a id="facebookLink" href="#" target="_blank" class="truncate"></a></div>
+                    <div id="cAddress" class="hidden flex items-start gap-2"><span class="text-gray-400 w-14 shrink-0">地址</span><span id="addressText" class="text-gray-900"></span></div>
+                    <div id="cSocio" class="hidden flex items-start gap-2"><span class="text-gray-400 w-14 shrink-0">股东</span><span id="socioText" class="text-gray-900"></span></div>
+                </div>
+            </div>
+
+            <!-- 链接 -->
+            <div class="px-5 py-3 border-t border-gray-100 flex flex-wrap gap-2">
+                <a id="linkStore" href="#" target="_blank" class="text-xs font-medium text-blue-600 bg-blue-50 px-3 py-1.5 rounded-full">打开店铺 →</a>
+                <a id="linkProfile" href="#" target="_blank" class="text-xs font-medium text-gray-600 bg-gray-100 px-3 py-1.5 rounded-full">卖家主页 →</a>
+                <span id="sellerIdBadge" class="text-xs text-gray-400 bg-gray-50 px-3 py-1.5 rounded-full"></span>
+            </div>
+        </div>
+    </div>
+</main>
+
+<footer class="max-w-2xl mx-auto px-4 pb-8 text-center text-xs text-gray-400">
+    数据来源：Mercado Livre · Google 搜索 · Brasil API (publica.cnpj.ws)
+</footer>
+
+<script>
+(function() {
+
+var urlInput = document.getElementById('urlInput');
+var searchBtn = document.getElementById('searchBtn');
+var loading = document.getElementById('loading');
+var resultContainer = document.getElementById('resultContainer');
+var cardSuccess = document.getElementById('cardSuccess');
+var cardError = document.getElementById('cardError');
+var cancelBtn = document.getElementById('cancelBtn');
+var elapsedSec = document.getElementById('elapsedSec');
+var progressBar = document.getElementById('progressBar');
+var stageText = document.getElementById('stageText');
+
+var timerId = null;
+var abortCtrl = null;
+
+// ---- 进度控制 ----
+function showLoading() {
+    cardSuccess.classList.add('hidden');
+    cardError.classList.add('hidden');
+    resultContainer.classList.add('hidden');
+    loading.classList.remove('hidden');
+    elapsedSec.textContent = '0';
+    progressBar.style.width = '0%';
+    stageText.textContent = '正在连接 Mercado Livre...';
+
+    var sec = 0;
+    timerId = setInterval(function() {
+        sec++;
+        elapsedSec.textContent = sec;
+        var pct = Math.min(90, sec * 3);
+        progressBar.style.width = pct + '%';
+        if (sec >= 25 && sec < 30) stageText.textContent = '搜索官网和联系方式...';
+        else if (sec >= 15 && sec < 25) stageText.textContent = '验证企业注册信息...';
+        else if (sec >= 6 && sec < 15) stageText.textContent = '搜索 CNPJ 和公司名...';
+    }, 1000);
+}
+
+function hideLoading() {
+    clearInterval(timerId);
+    timerId = null;
+    loading.classList.add('hidden');
+    resultContainer.classList.remove('hidden');
+}
+
+function showError(msg) {
+    hideLoading();
+    cardError.classList.remove('hidden');
+    document.getElementById('errorMsg').textContent = msg;
+}
+
+function showSnapshot(d) {
+    hideLoading();
+    cardSuccess.classList.remove('hidden');
+
+    // Seller
+    document.getElementById('sellerName').textContent = d.seller_name || 'Unknown';
+    document.getElementById('sourceTag').textContent = '来源: ' + (d.source || 'public page');
+
+    // Reputation badge
+    var badge = document.getElementById('reputationBadge');
+    var level = (d.reputation && d.reputation.level) || '';
+    if (level) {
+        badge.textContent = level;
+        badge.classList.remove('hidden');
+        badge.className = 'px-3 py-1 rounded-full text-xs font-bold ' + (
+            level.indexOf('Platinum') >= 0 ? 'bg-gray-900 text-white' :
+            level.indexOf('Gold') >= 0 ? 'bg-yellow-500 text-white' :
+            level.indexOf('Silver') >= 0 || level.indexOf('Lider') >= 0 ? 'bg-blue-500 text-white' :
+            'bg-gray-500 text-white'
+        );
+    } else { badge.classList.add('hidden'); }
+
+    // Stats
+    var rep = d.reputation || {};
+    document.getElementById('statSales').textContent = rep.sales || '-';
+    document.getElementById('statFollowers').textContent = rep.followers || '-';
+    document.getElementById('statProducts').textContent = rep.products || '-';
+
+    // Service
+    var sr = document.getElementById('serviceRow');
+    if (rep.service || rep.delivery) {
+        sr.classList.remove('hidden');
+        document.getElementById('serviceBadge').style.display = rep.service ? '' : 'none';
+        document.getElementById('deliveryBadge').style.display = rep.delivery ? '' : 'none';
+        document.getElementById('serviceText').textContent = rep.service || '';
+        document.getElementById('deliveryText').textContent = rep.delivery || '';
+    } else { sr.classList.add('hidden'); }
+
+    // Legal
+    var leg = d.legal_info || {};
+    var la = document.getElementById('legalAvailable');
+    var lu = document.getElementById('legalUnavailable');
+    if (leg.cnpj) {
+        la.classList.remove('hidden');
+        lu.classList.add('hidden');
+        document.getElementById('razaoSocial').textContent = leg.razao_social || '-';
+        document.getElementById('cnpj').textContent = leg.cnpj || '-';
+
+        showIf('fantasiaRow', 'nomeFantasia', leg.nome_fantasia);
+
+        var sr2 = document.getElementById('situacaoRow');
+        if (leg.situacao_cadastral) {
+            sr2.classList.remove('hidden');
+            var s = document.getElementById('situacaoCadastral');
+            s.textContent = leg.situacao_cadastral;
+            s.className = 'font-medium mt-0.5 ' + (leg.situacao_cadastral === 'Ativa' ? 'text-green-600' : 'text-red-600');
+        } else { sr2.classList.add('hidden'); }
+
+        showIf('cidadeRow', 'cidadeEstado', leg.cidade ? leg.cidade + (leg.estado ? ' / ' + leg.estado : '') : null);
+        showIf('aberturaRow', 'dataAbertura', leg.data_abertura);
+        showIf('atividadeRow', 'atividadePrincipal', leg.atividade_principal);
+        document.getElementById('legalNote').textContent = leg.note || '';
+    } else {
+        la.classList.add('hidden');
+        lu.classList.remove('hidden');
+    }
+
+    // Links
+    var store = document.getElementById('linkStore');
+    if (d.store_url) { store.href = d.store_url; store.style.display = ''; }
+    else { store.style.display = 'none'; }
+
+    var prof = document.getElementById('linkProfile');
+    if (d.profile_url) { prof.href = d.profile_url; prof.style.display = ''; }
+    else { prof.style.display = 'none'; }
+
+    var sid = document.getElementById('sellerIdBadge');
+    if (d.seller_id) { sid.textContent = 'ID: ' + d.seller_id; sid.style.display = ''; }
+    else { sid.style.display = 'none'; }
+
+    // Contacts section
+    var contactSection = document.getElementById('contactSection');
+    var hasContact = false;
+
+    // Phone (Receita)
+    if (leg.telefone) {
+        hasContact = true;
+        document.getElementById('cPhone').classList.remove('hidden');
+        document.getElementById('phoneText').textContent = leg.telefone + ' (Receita Federal)';
+    }
+    // Email (Receita)
+    if (leg.email) {
+        hasContact = true;
+        document.getElementById('cEmail').classList.remove('hidden');
+        document.getElementById('emailText').textContent = leg.email;
+    }
+    // Address
+    if (leg.endereco) {
+        hasContact = true;
+        document.getElementById('cAddress').classList.remove('hidden');
+        var addr = leg.endereco;
+        if (leg.cep) addr += ' - CEP ' + leg.cep;
+        if (leg.cidade) addr += ' - ' + leg.cidade + '/' + (leg.estado||'');
+        document.getElementById('addressText').textContent = addr;
+    }
+    // Socio
+    if (leg.socios && leg.socios.length > 0) {
+        hasContact = true;
+        document.getElementById('cSocio').classList.remove('hidden');
+        document.getElementById('socioText').textContent = leg.socios.map(function(s){return s.nome;}).join(' / ');
+    }
+
+    // Google contacts
+    var con = d.contacts || {};
+    // Website
+    var vw = con.website_verified || {};
+    if (con.website) {
+        hasContact = true;
+        document.getElementById('cWebsite').classList.remove('hidden');
+        var wl = document.getElementById('websiteLink');
+        wl.href = con.website;
+        var siteLabel = con.website.replace('https://','').replace('http://','');
+        if (vw.status === 'offline') {
+            siteLabel += ' (已下线)';
+            wl.className = 'text-amber-600 hover:text-amber-800 truncate';
+        } else {
+            var conf = con.website_confidence || '';
+            if (conf === '基本确认' || conf === '待确认') siteLabel += ' (' + conf + ')';
+            wl.className = 'text-blue-600 hover:text-blue-800 truncate';
+        }
+        wl.textContent = siteLabel;
+    }
+
+    // Instagram
+    if (con.instagram) {
+        hasContact = true;
+        document.getElementById('cInstagram').classList.remove('hidden');
+        var il = document.getElementById('instagramLink');
+        var iname = con.instagram.replace('@','');
+        il.href = 'https://instagram.com/' + iname;
+        il.textContent = con.instagram;
+        il.className = 'text-blue-600 hover:text-blue-800';
+    }
+
+    // Facebook
+    if (con.facebook) {
+        hasContact = true;
+        document.getElementById('cFacebook').classList.remove('hidden');
+        var fl = document.getElementById('facebookLink');
+        fl.href = con.facebook;
+        fl.textContent = con.facebook.replace('https://','').replace('http://','').replace('www.','');
+        fl.className = 'text-blue-600 hover:text-blue-800 truncate';
+    }
+
+    // Google phones (supplement)
+    if (con.phones && con.phones.length > 0 && !leg.telefone) {
+        hasContact = true;
+        document.getElementById('cPhone').classList.remove('hidden');
+        document.getElementById('phoneText').textContent = con.phones[0] + ' (Google搜索)';
+    }
+
+    // Google emails (supplement)
+    if (con.emails && con.emails.length > 0 && !leg.email) {
+        hasContact = true;
+        document.getElementById('cEmail').classList.remove('hidden');
+        document.getElementById('emailText').textContent = con.emails[0];
+    }
+
+    if (hasContact) {
+        contactSection.classList.remove('hidden');
+    } else {
+        contactSection.classList.add('hidden');
+    }
+}
+
+function showIf(rowId, elId, value) {
+    var row = document.getElementById(rowId);
+    if (value) { row.classList.remove('hidden'); document.getElementById(elId).textContent = value; }
+    else { row.classList.add('hidden'); }
+}
+
+// ---- 查询 ----
+async function doSearch() {
+    var url = urlInput.value.trim();
+    if (!url) { urlInput.focus(); return; }
+
+    showLoading();
+    searchBtn.disabled = true;
+    abortCtrl = new AbortController();
+
+    try {
+        var resp = await fetch('/api/scrape', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url }),
+            signal: abortCtrl.signal,
+        });
+        var body = await resp.json();
+
+        if (body.error) { showError(body.error); }
+        else if (body.data) { showSnapshot(body.data); }
+        else { showError('未返回任何数据'); }
+    } catch (e) {
+        if (e.name !== 'AbortError') {
+            showError('无法连接服务器，请确认已执行 python app.py 启动服务。');
+        } else {
+            hideLoading();
+        }
+    } finally {
+        searchBtn.disabled = false;
+        abortCtrl = null;
+    }
+}
+
+cancelBtn.addEventListener('click', function() {
+    if (abortCtrl) { abortCtrl.abort(); hideLoading(); searchBtn.disabled = false; }
+});
+
+searchBtn.addEventListener('click', doSearch);
+urlInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); doSearch(); }
+});
+
+urlInput.focus();
+
+})();
+</script>
+</body>
+</html>
