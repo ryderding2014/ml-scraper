@@ -198,11 +198,9 @@ async def _create_context(pw):
             "--disable-setuid-sandbox", "--no-first-run",
             "--disable-default-apps", "--disable-infobars",
             "--disable-background-networking", "--disable-sync",
-            # 内存优化（Render 免费 tier 512MB）
-            "--single-process",
+            # 内存优化
             "--disable-features=TranslateUI",
             "--disable-extensions",
-            "--js-flags=--max-old-space-size=128",
         ],
         viewport={"width": 1366, "height": 768},
         user_agent=(
@@ -440,9 +438,15 @@ async def _scrape_profile_page(page, nick: str, original_url: str = "") -> dict:
 
         seller_name = await page.evaluate("""() => {
             var h = document.querySelector('h1');
-            if (h) return h.textContent.trim();
+            if (h) {
+                var t = h.textContent.trim();
+                // 去掉 "Anúncios de" 前缀
+                return t.replace(/^Anúncios?\s+de\s+/i, '').trim();
+            }
             var t = document.querySelector('title');
-            if (t) return t.textContent.trim();
+            if (t) {
+                return t.textContent.trim().replace(/^Anúncios?\s+de\s+/i, '').trim();
+            }
             return null;
         }""")
 

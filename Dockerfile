@@ -46,4 +46,8 @@ USER appuser
 # 暴露端口（通过环境变量 PORT 配置，默认 8000）
 EXPOSE 8000
 
+# 为容器环境添加额外的 Chromium 启动参数
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV CHROMIUM_FLAGS="--disable-gpu --disable-dev-shm-usage --no-sandbox --disable-setuid-sandbox"
+
 CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
