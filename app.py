@@ -40,8 +40,36 @@ PAGE_SETTLE_MS = 2_500
 CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
-# 按 seller_id 缓存 CNPJ 查询结果（避免重复查询同一个卖家）
-# 格式: {seller_id: {"cnpj": ..., "razao_social": ..., ...}}
+# 人工确认的 seller_id → CNPJ 映射表（优先于 Google 搜索）
+# 格式: {seller_id: {"cnpj": ..., "razao_social": ..., "nome_fantasia": ...}}
+SELLER_CNPJ_MAP = {
+    "1204030353": {
+        "cnpj": "60.113.920/0001-48",
+        "razao_social": "MCM DISTRIBUIDORA E REPRESENTACAO LTDA",
+        "nome_fantasia": "MCM DISTRIBUIDORA",
+        "situacao_cadastral": "Ativa",
+        "cidade": "Brasília",
+        "estado": "DF",
+        "match_confidence": "人工确认",
+        "source": "人工维护映射表",
+        "verified": True,
+        "note": "卖家名 'starshoppp' 为店铺马甲名，已由人工确认为 MCM DISTRIBUIDORA E REPRESENTACAO LTDA。",
+    },
+    "2206301229": {
+        "cnpj": "60.113.920/0001-48",
+        "razao_social": "MCM DISTRIBUIDORA E REPRESENTACAO LTDA",
+        "nome_fantasia": "MCM DISTRIBUIDORA",
+        "situacao_cadastral": "Ativa",
+        "cidade": "Brasília",
+        "estado": "DF",
+        "match_confidence": "人工确认",
+        "source": "人工维护映射表",
+        "verified": True,
+        "note": "卖家名 'RR20250112100026' 为店铺马甲名，已由人工确认为 MCM DISTRIBUIDORA E REPRESENTACAO LTDA。",
+    },
+}
+
+# 运行时缓存（自动从 Google/Brasil API 查到的结果）
 _seller_cache: dict = {}
 
 
@@ -907,10 +935,13 @@ async def api_scrape(payload: ScrapeRequest):
         verified = None
         seller_id = data.get("seller_id")
 
-        # 先查缓存（同一个 seller_id 可能是不同产品/不同卖家名）
-        if seller_id and seller_id in _seller_cache:
+        # 先查人工映射表，再查缓存
+        if seller_id and seller_id in SELLER_CNPJ_MAP:
+            legal_info.update(SELLER_CNPJ_MAP[seller_id])
+            logger.info(f"人工映射命中: seller_id={seller_id}, CNPJ={legal_info.get('cnpj')}")
+        elif seller_id and seller_id in _seller_cache:
             cached = _seller_cache[seller_id]
-            logger.info(f"命中缓存: seller_id={seller_id}, CNPJ={cached.get('cnpj')}")
+            logger.info(f"缓存命中: seller_id={seller_id}, CNPJ={cached.get('cnpj')}")
             legal_info.update(cached)
             legal_info["source"] = "缓存（相同卖家ID）"
 
@@ -931,7 +962,7 @@ async def api_scrape(payload: ScrapeRequest):
                         for suffix in ["ltda", "s.a", "s/a", "eireli", "mei", "comercio", "import", "distribu"])
         )
 
-        if is_valid_name and not is_alias:
+        if is_valid_name and not is_alias and not legal_info.get("cnpj"):
             google_result = await _google_search_cnpj(page, seller_name)
 
             candidates = google_result.get("candidates", [])
@@ -1028,6 +1059,14 @@ async def api_scrape(payload: ScrapeRequest):
                         legal_info["match_confidence"] = "待确认"
                     else:
                         legal_info["match_confidence"] = "待确认"
+
+                    # 存入缓存（下次同 seller_id 直接复用）
+                    if seller_id and best_score >= 50:
+                        _seller_cache[seller_id] = {
+                            k: v for k, v in legal_info.items()
+                            if k not in ("note", "source", "match_confidence", "cnpj_candidates")
+                        }
+                        _seller_cache[seller_id]["match_confidence"] = legal_info.get("match_confidence")
 
                 # ====== 第四步：官网/联系（轻量模式，只搜一次）======
                 razao = legal_info.get("razao_social", "")
