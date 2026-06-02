@@ -951,26 +951,81 @@ async def api_scrape(payload: ScrapeRequest):
                 # ====== 第四步：官网/联系（轻量模式，只搜一次）======
                 razao = legal_info.get("razao_social", "")
                 contacts = await _google_search_contacts(page, seller_name, razao)
-                # 跳过官网验证节省 ~5s
+
+                # ====== 第五步：交叉验证——确认 CNPJ 是否真的属于这个卖家 ======
+                if legal_info.get("cnpj"):
+                    fantasia = (legal_info.get("nome_fantasia") or "").strip()
+                    ml_name_norm = re.sub(r'[^a-z0-9]', '', seller_name.lower())
+                    fantasia_norm = re.sub(r'[^a-z0-9]', '', fantasia.lower())
+                    razao_norm = re.sub(r'[^a-z0-9]', '', (legal_info.get("razao_social") or "").lower())
+
+                    if ml_name_norm == fantasia_norm:
+                        legal_info["match_confidence"] = "确认"
+                    elif ml_name_norm in fantasia_norm or fantasia_norm in ml_name_norm:
+                        legal_info["match_confidence"] = "基本确认"
+                    elif ml_name_norm in razao_norm or any(
+                        word for word in ml_name_norm.split() if len(word) > 3 and word in razao_norm
+                    ):
+                        legal_info["match_confidence"] = "待确认"
+                    else:
+                        legal_info["match_confidence"] = "不匹配"
+
+                    if legal_info["match_confidence"] == "不匹配":
+                        # 清除不可靠的 CNPJ 数据
+                        legal_info["cnpj"] = None
+                        legal_info["razao_social"] = None
+                        legal_info["nome_fantasia"] = None
+                        legal_info["situacao_cadastral"] = None
+                        legal_info["note"] = f"Google 搜索到的 CNPJ 属于 '{fantasia or legal_info.get('razao_social','')}'，与 ML 卖家名 '{seller_name}' 不匹配，已丢弃。"
+
+                # 如果因不匹配丢弃了 CNPJ，尝试用 "+mercado livre" 再搜一次
+                if not legal_info.get("cnpj") and legal_info.get("note") and "不匹配" in legal_info.get("note", ""):
+                    # 用卖家名 + "mercado livre" 精确搜索
+                    retry_result = await _google_search_cnpj(page, f"{seller_name} mercado livre")
+                    if retry_result.get("cnpj"):
+                        legal_info["cnpj"] = retry_result["cnpj"]
+                        legal_info["razao_social"] = retry_result["razao_social"]
+                        legal_info["source"] = "Google 精确搜索"
+                        # 快速验证
+                        verified2 = await _verify_cnpj_via_brasilapi(page, retry_result["cnpj"])
+                        if verified2:
+                            raw = verified2.get("cnpj") or ""
+                            if raw and len(raw) >= 14:
+                                legal_info["cnpj"] = f"{raw[:2]}.{raw[2:5]}.{raw[5:8]}/{raw[8:12]}-{raw[12:14]}"
+                            legal_info["razao_social"] = verified2.get("razao_social") or legal_info["razao_social"]
+                            legal_info["nome_fantasia"] = verified2.get("nome_fantasia")
+                            legal_info["situacao_cadastral"] = verified2.get("situacao_cadastral")
+                            legal_info["cidade"] = verified2.get("cidade")
+                            legal_info["estado"] = verified2.get("estado")
+                            legal_info["telefone"] = legal_info.get("telefone") or verified2.get("telefone")
+                            legal_info["email"] = legal_info.get("email") or verified2.get("email")
+                            legal_info["endereco"] = legal_info.get("endereco") or verified2.get("endereco")
+                            legal_info["verified"] = True
+                            legal_info["match_confidence"] = "二次验证"
 
         # 拼装最终数据
         data["legal_info"] = legal_info
         data["contacts"] = contacts
         if not legal_info.get("cnpj"):
             if not is_valid_name:
-                data["legal_info"]["note"] = "未能获取到有效的卖家名称，无法进行 CNPJ 反查。请确认 URL 是否正确。"
+                data["legal_info"]["note"] = "未能获取到有效的卖家名称，无法进行 CNPJ 反查。"
+            elif legal_info.get("note"):
+                pass  # 已在上面设置（如不匹配丢弃的情况）
             else:
                 data["legal_info"]["note"] = (
-                    "Mercado Livre 不公开显示卖家 CNPJ/Razão Social，"
-                    "且 Google 搜索未找到相关注册信息。"
-                    "该卖家可能为个人卖家 (CPF) 或新注册企业。"
+                    "Google 搜索未找到该卖家的 CNPJ 注册信息。可能为个人卖家 (CPF) 或新注册企业。"
                 )
         else:
-            data["legal_info"]["note"] = (
-                "CNPJ 通过 Google 搜索反查获得，已通过 Brasil API 验证。"
-                if verified else
-                "CNPJ 通过 Google 搜索反查获得，未经第三方验证。"
-            )
+            conf_map = {
+                "确认": f"✅ 已确认：Nome Fantasia '{legal_info.get('nome_fantasia','')}' 与 ML 卖家名匹配",
+                "基本确认": f"⚠️ 基本确认：公司名与卖家名高度相似",
+                "待确认": f"⚠️ 待确认：公司名与卖家名部分匹配，CNPJ 可能属于相关但不完全相同的实体",
+                "二次验证": f"✅ 二次搜索验证通过",
+            }
+            conf = legal_info.get("match_confidence", "")
+            conf_note = conf_map.get(conf, "")
+            base = "已通过 Brasil API 验证。" if verified else "未经验证。"
+            data["legal_info"]["note"] = f"{conf_note} {base}" if conf_note else base
 
         await context.close()
         await pw.stop()

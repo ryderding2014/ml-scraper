@@ -110,7 +110,7 @@
                 <div id="legalAvailable" class="hidden">
                     <div class="grid grid-cols-2 gap-3 text-sm">
                         <div><span class="text-xs text-gray-400">Razao Social</span><p id="razaoSocial" class="font-medium text-gray-900 mt-0.5"></p></div>
-                        <div><span class="text-xs text-gray-400">CNPJ</span><p id="cnpj" class="font-medium text-gray-900 font-mono mt-0.5"></p></div>
+                        <div><span class="text-xs text-gray-400">CNPJ <span id="cnpjConfidence" class="ml-1"></span></span><p id="cnpj" class="font-medium text-gray-900 font-mono mt-0.5"></p></div>
                         <div id="fantasiaRow" class="hidden"><span class="text-xs text-gray-400">Nome Fantasia</span><p id="nomeFantasia" class="font-medium text-gray-900 mt-0.5"></p></div>
                         <div id="situacaoRow" class="hidden"><span class="text-xs text-gray-400">Situacao</span><p id="situacaoCadastral" class="font-medium mt-0.5"></p></div>
                         <div id="cidadeRow" class="hidden"><span class="text-xs text-gray-400">Localizacao</span><p id="cidadeEstado" class="font-medium text-gray-900 mt-0.5"></p></div>
@@ -251,6 +251,22 @@ function showSnapshot(d) {
         lu.classList.add('hidden');
         document.getElementById('razaoSocial').textContent = leg.razao_social || '-';
         document.getElementById('cnpj').textContent = leg.cnpj || '-';
+
+        // Confidence badge
+        var confBadge = document.getElementById('cnpjConfidence');
+        var conf = leg.match_confidence || '';
+        if (conf === '确认' || conf === '二次验证') {
+            confBadge.textContent = '✓' + conf;
+            confBadge.className = 'text-xs text-green-600 font-medium';
+        } else if (conf === '基本确认') {
+            confBadge.textContent = '⚠' + conf;
+            confBadge.className = 'text-xs text-yellow-600 font-medium';
+        } else if (conf === '待确认') {
+            confBadge.textContent = '⚠待确认';
+            confBadge.className = 'text-xs text-red-500 font-medium';
+        } else {
+            confBadge.textContent = '';
+        }
 
         showIf('fantasiaRow', 'nomeFantasia', leg.nome_fantasia);
 
