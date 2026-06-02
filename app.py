@@ -766,8 +766,13 @@ async def _verify_cnpj_via_brasilapi(page, cnpj_raw: str) -> Optional[dict]:
                 tel1 = est.get("telefone1", "") or ""
                 telefone = f"({ddd1}) {tel1}" if ddd1 and tel1 else (tel1 or None)
 
+                # 用 estabelecimento.cnpj（完整 14 位）而非 cnpj_raiz（8 位）
+                full_cnpj = est.get("cnpj") if isinstance(est, dict) else None
+                if not full_cnpj:
+                    full_cnpj = data.get("cnpj_raiz") or cnpj_raw
+
                 return {
-                    "cnpj": data.get("cnpj_raiz") or cnpj_raw,
+                    "cnpj": full_cnpj,
                     "razao_social": data.get("razao_social"),
                     "nome_fantasia": est.get("nome_fantasia") if isinstance(est, dict) else None,
                     "situacao_cadastral": est.get("situacao_cadastral") if isinstance(est, dict) else None,
@@ -992,14 +997,12 @@ async def api_scrape(payload: ScrapeRequest):
 
                 if best_verified:
                     verified = best_verified
-                    # 格式化 CNPJ
-                    raw_cnpj = verified.get("cnpj") or ""
-                    if raw_cnpj and len(raw_cnpj) >= 14:
+                    # 格式化 CNPJ（严格验证：必须 14 位数字）
+                    raw_cnpj = (verified.get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+                    if raw_cnpj and len(raw_cnpj) == 14 and raw_cnpj.isdigit():
                         formatted = f"{raw_cnpj[:2]}.{raw_cnpj[2:5]}.{raw_cnpj[5:8]}/{raw_cnpj[8:12]}-{raw_cnpj[12:14]}"
-                    elif raw_cnpj and len(raw_cnpj) == 8:
-                        formatted = legal_info.get("cnpj")
                     else:
-                        formatted = raw_cnpj or cand["cnpj"]
+                        formatted = cand.get("cnpj", "")
                     legal_info["cnpj"] = formatted
                     legal_info["razao_social"] = verified.get("razao_social") or cand.get("razao_social")
                     legal_info["nome_fantasia"] = verified.get("nome_fantasia")
@@ -1038,8 +1041,8 @@ async def api_scrape(payload: ScrapeRequest):
                         # 快速验证第一个候选
                         verified2 = await _verify_cnpj_via_brasilapi(page, retry_candidates[0]["cnpj"])
                         if verified2:
-                            raw = verified2.get("cnpj") or ""
-                            if raw and len(raw) >= 14:
+                            raw = (verified2.get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+                            if raw and len(raw) == 14 and raw.isdigit():
                                 legal_info["cnpj"] = f"{raw[:2]}.{raw[2:5]}.{raw[5:8]}/{raw[8:12]}-{raw[12:14]}"
                             legal_info["razao_social"] = verified2.get("razao_social") or legal_info["razao_social"]
                             legal_info["nome_fantasia"] = verified2.get("nome_fantasia")
