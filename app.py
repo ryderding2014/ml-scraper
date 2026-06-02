@@ -512,48 +512,40 @@ async def _google_search_cnpj(page, seller_name: str) -> dict:
         logger.info(f"Google 搜索未找到 {seller_name} 的 CNPJ")
         return {}
 
-    # 统计每个 CNPJ 出现次数（高频的更可能是正确的）
+    # 统计每个 CNPJ 出现次数，排除 ML 自己的
     cnpj_counts = {}
     for c in cnpj_candidates:
         cnpj = c["cnpj"]
-        cnpj_counts[cnpj] = cnpj_counts.get(cnpj, 0) + 1
+        if cnpj != ML_OWN_CNPJ:
+            cnpj_counts[cnpj] = cnpj_counts.get(cnpj, 0) + 1
 
-    # 取出现次数最多的 CNPJ
-    best_cnpj = max(cnpj_counts, key=cnpj_counts.get)
-    best_context = next(c["context"] for c in cnpj_candidates if c["cnpj"] == best_cnpj)
+    # 返回所有候选（按频率排序），让调用方逐一验证
+    sorted_cnpjs = sorted(cnpj_counts.items(), key=lambda x: -x[1])
 
-    # 从上下文中提取 Razão Social
-    razao_social = None
-    patterns = [
-        r"raz[aã]o social[:\s]+([A-Z][^.]{5,80}(?:LTDA|S/?A|EIRELI|MEI|LTDA ME))",
-        r"sob a raz[aã]o social[:\s]+([A-Z][^.]{5,80}(?:LTDA|S/?A|EIRELI|MEI|LTDA ME))",
-        r"raz[aã]o social[:\s]+([^.]{5,100}(?:LTDA|S/?A|EIRELI|MEI))",
-        r"nome empresarial[:\s]+([^.]{5,100}(?:LTDA|S/?A|EIRELI|MEI))",
-    ]
-    for pat in patterns:
-        m = re.search(pat, best_context, re.IGNORECASE)
-        if m:
-            razao_social = m.group(1).strip()
-            break
+    # 从上下文中提取每个候选的 Razão Social
+    candidates = []
+    for cnpj, count in sorted_cnpjs[:5]:  # 最多 5 个候选
+        ctx = next((c["context"] for c in cnpj_candidates if c["cnpj"] == cnpj), "")
+        razao = None
+        patterns = [
+            r"raz[aã]o social[:\s]+([A-Z][^.]{5,80}(?:LTDA|S/?A|EIRELI|MEI|LTDA ME))",
+            r"sob a raz[aã]o social[:\s]+([A-Z][^.]{5,80}(?:LTDA|S/?A|EIRELI|MEI|LTDA ME))",
+            r"raz[aã]o social[:\s]+([^.]{5,100}(?:LTDA|S/?A|EIRELI|MEI))",
+            r"nome empresarial[:\s]+([^.]{5,100}(?:LTDA|S/?A|EIRELI|MEI))",
+        ]
+        for pat in patterns:
+            m = re.search(pat, ctx, re.IGNORECASE)
+            if m:
+                razao = m.group(1).strip()
+                break
+        candidates.append({"cnpj": cnpj, "razao_social": razao, "count": count})
 
-    # 如果没找到 Razão Social，从搜索结果中通过关键字提取
-    if not razao_social:
-        # 查找包含最佳 CNPJ 的那行文字的更多上下文
-        for line in body.split('\n'):
-            if best_cnpj in line and 'CNPJ' in line:
-                # 尝试从中提取公司名
-                m = re.search(r'(?:empresa|companhia|raz[aã]o social|nome)[:\s]+([A-Z][^.]{10,120})', line, re.IGNORECASE)
-                if m:
-                    razao_social = m.group(1).strip().rstrip(',.')
-                    break
+    if not candidates:
+        logger.info(f"Google 搜索未找到 {seller_name} 的 CNPJ")
+        return {"candidates": []}
 
-    logger.info(f"Google 搜索结果: CNPJ={best_cnpj}, Razão={razao_social}")
-    return {
-        "cnpj": best_cnpj,
-        "razao_social": razao_social,
-        "cnpj_source": "Google 搜索反查",
-        "cnpj_candidates": len(cnpj_candidates),
-    }
+    logger.info(f"Google 搜索结果: {len(candidates)} 个候选 CNPJ")
+    return {"candidates": candidates, "cnpj_source": "Google 搜索反查"}
 
 
 # =========================================================================
@@ -915,15 +907,47 @@ async def api_scrape(payload: ScrapeRequest):
         if is_valid_name:
             google_result = await _google_search_cnpj(page, seller_name)
 
-            if google_result.get("cnpj"):
-                legal_info["cnpj"] = google_result["cnpj"]
-                legal_info["razao_social"] = google_result["razao_social"]
+            candidates = google_result.get("candidates", [])
+            if candidates:
                 legal_info["source"] = google_result.get("cnpj_source")
-                legal_info["cnpj_candidates"] = google_result.get("cnpj_candidates", 0)
+                legal_info["cnpj_candidates"] = len(candidates)
 
-                # ====== 第三步：Brasil API 验证 ======
-                verified = await _verify_cnpj_via_brasilapi(page, google_result["cnpj"])
-                if verified:
+                # ====== 第三步：逐一验证所有候选 CNPJ，选最优 ======
+                best_score = -1
+                best_verified = None
+
+                for cand in candidates[:3]:  # 最多验证 3 个候选
+                    v = await _verify_cnpj_via_brasilapi(page, cand["cnpj"])
+                    if not v:
+                        continue
+
+                    # 评分：对比 ML 卖家名和 Brasil API 返回的 nome_fantasia / razao_social
+                    ml_norm = re.sub(r'[^a-z0-9]', '', seller_name.lower())
+                    fantasia = (v.get("nome_fantasia") or "").lower()
+                    fantasia_norm = re.sub(r'[^a-z0-9]', '', fantasia)
+                    razao_norm = re.sub(r'[^a-z0-9]', '', (v.get("razao_social") or "").lower())
+
+                    score = 0
+                    if ml_norm == fantasia_norm:
+                        score = 100
+                    elif ml_norm in fantasia_norm or fantasia_norm in ml_norm:
+                        score = 80
+                    elif ml_norm in razao_norm:
+                        score = 60
+                    else:
+                        # 看有多少共同词
+                        ml_words = set(ml_norm.split())
+                        razao_words = set(razao_norm.split())
+                        common = ml_words & razao_words
+                        score = len(common) * 10
+
+                    logger.info(f"  候选 {cand['cnpj']}: score={score}, fantasia={v.get('nome_fantasia','')}")
+                    if score > best_score:
+                        best_score = score
+                        best_verified = v
+
+                if best_verified:
+                    verified = best_verified
                     # 格式化 CNPJ
                     raw_cnpj = verified.get("cnpj") or ""
                     if raw_cnpj and len(raw_cnpj) >= 14:
@@ -931,9 +955,9 @@ async def api_scrape(payload: ScrapeRequest):
                     elif raw_cnpj and len(raw_cnpj) == 8:
                         formatted = legal_info.get("cnpj")
                     else:
-                        formatted = raw_cnpj or legal_info.get("cnpj")
+                        formatted = raw_cnpj or cand["cnpj"]
                     legal_info["cnpj"] = formatted
-                    legal_info["razao_social"] = verified.get("razao_social") or legal_info["razao_social"]
+                    legal_info["razao_social"] = verified.get("razao_social") or cand.get("razao_social")
                     legal_info["nome_fantasia"] = verified.get("nome_fantasia")
                     legal_info["situacao_cadastral"] = verified.get("situacao_cadastral")
                     legal_info["data_abertura"] = verified.get("data_abertura")
@@ -948,46 +972,27 @@ async def api_scrape(payload: ScrapeRequest):
                     legal_info["email"] = verified.get("email")
                     legal_info["verified"] = True
 
+                    # 设定可信度
+                    if best_score >= 100:
+                        legal_info["match_confidence"] = "确认"
+                    elif best_score >= 80:
+                        legal_info["match_confidence"] = "基本确认"
+                    elif best_score >= 50:
+                        legal_info["match_confidence"] = "待确认"
+                    else:
+                        legal_info["match_confidence"] = "待确认"
+
                 # ====== 第四步：官网/联系（轻量模式，只搜一次）======
                 razao = legal_info.get("razao_social", "")
                 contacts = await _google_search_contacts(page, seller_name, razao)
 
-                # ====== 第五步：交叉验证——确认 CNPJ 是否真的属于这个卖家 ======
-                if legal_info.get("cnpj"):
-                    fantasia = (legal_info.get("nome_fantasia") or "").strip()
-                    ml_name_norm = re.sub(r'[^a-z0-9]', '', seller_name.lower())
-                    fantasia_norm = re.sub(r'[^a-z0-9]', '', fantasia.lower())
-                    razao_norm = re.sub(r'[^a-z0-9]', '', (legal_info.get("razao_social") or "").lower())
-
-                    if ml_name_norm == fantasia_norm:
-                        legal_info["match_confidence"] = "确认"
-                    elif ml_name_norm in fantasia_norm or fantasia_norm in ml_name_norm:
-                        legal_info["match_confidence"] = "基本确认"
-                    elif ml_name_norm in razao_norm or any(
-                        word for word in ml_name_norm.split() if len(word) > 3 and word in razao_norm
-                    ):
-                        legal_info["match_confidence"] = "待确认"
-                    else:
-                        legal_info["match_confidence"] = "不匹配"
-
-                    if legal_info["match_confidence"] == "不匹配":
-                        # 清除不可靠的 CNPJ 数据
-                        legal_info["cnpj"] = None
-                        legal_info["razao_social"] = None
-                        legal_info["nome_fantasia"] = None
-                        legal_info["situacao_cadastral"] = None
-                        legal_info["note"] = f"Google 搜索到的 CNPJ 属于 '{fantasia or legal_info.get('razao_social','')}'，与 ML 卖家名 '{seller_name}' 不匹配，已丢弃。"
-
-                # 如果因不匹配丢弃了 CNPJ，尝试用 "+mercado livre" 再搜一次
-                if not legal_info.get("cnpj") and legal_info.get("note") and "不匹配" in legal_info.get("note", ""):
-                    # 用卖家名 + "mercado livre" 精确搜索
+                # 如果没找到或评分太低，尝试用 "+mercado livre" 再搜一次
+                if not legal_info.get("cnpj"):
                     retry_result = await _google_search_cnpj(page, f"{seller_name} mercado livre")
-                    if retry_result.get("cnpj"):
-                        legal_info["cnpj"] = retry_result["cnpj"]
-                        legal_info["razao_social"] = retry_result["razao_social"]
-                        legal_info["source"] = "Google 精确搜索"
-                        # 快速验证
-                        verified2 = await _verify_cnpj_via_brasilapi(page, retry_result["cnpj"])
+                    retry_candidates = retry_result.get("candidates", [])
+                    if retry_candidates:
+                        # 快速验证第一个候选
+                        verified2 = await _verify_cnpj_via_brasilapi(page, retry_candidates[0]["cnpj"])
                         if verified2:
                             raw = verified2.get("cnpj") or ""
                             if raw and len(raw) >= 14:
