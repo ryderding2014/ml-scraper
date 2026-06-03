@@ -41,33 +41,8 @@ CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
 # 人工确认的 seller_id → CNPJ 映射表（优先于 Google 搜索）
-# 格式: {seller_id: {"cnpj": ..., "razao_social": ..., "nome_fantasia": ...}}
-SELLER_CNPJ_MAP = {
-    "1204030353": {
-        "cnpj": "60.113.920/0001-48",
-        "razao_social": "MCM DISTRIBUIDORA E REPRESENTACAO LTDA",
-        "nome_fantasia": "MCM DISTRIBUIDORA",
-        "situacao_cadastral": "Ativa",
-        "cidade": "Brasília",
-        "estado": "DF",
-        "match_confidence": "人工确认",
-        "source": "人工维护映射表",
-        "verified": True,
-        "note": "卖家名 'starshoppp' 为店铺马甲名，已由人工确认为 MCM DISTRIBUIDORA E REPRESENTACAO LTDA。",
-    },
-    "2206301229": {
-        "cnpj": "60.113.920/0001-48",
-        "razao_social": "MCM DISTRIBUIDORA E REPRESENTACAO LTDA",
-        "nome_fantasia": "MCM DISTRIBUIDORA",
-        "situacao_cadastral": "Ativa",
-        "cidade": "Brasília",
-        "estado": "DF",
-        "match_confidence": "人工确认",
-        "source": "人工维护映射表",
-        "verified": True,
-        "note": "卖家名 'RR20250112100026' 为店铺马甲名，已由人工确认为 MCM DISTRIBUIDORA E REPRESENTACAO LTDA。",
-    },
-}
+# 仅添加 100% 确认的映射。地理位置不一致的不加入。
+SELLER_CNPJ_MAP = {}
 
 # 运行时缓存（自动从 Google/Brasil API 查到的结果）
 _seller_cache: dict = {}
@@ -499,6 +474,7 @@ async def _scrape_profile_page(page, nick: str, original_url: str = "") -> dict:
             "profile_nick": nick,
             "reputation": {"followers": followers},
             "source": "卖家资料页",
+            "location": await _extract_seller_location(page),
         }
 
     raise ValueError("无法访问卖家页面，卖家可能不存在或页面已下线。")
@@ -507,6 +483,32 @@ async def _scrape_profile_page(page, nick: str, original_url: str = "") -> dict:
 # =========================================================================
 # 第二步：Google 搜索反查 CNPJ
 # =========================================================================
+
+
+async def _extract_seller_location(page) -> Optional[dict]:
+    """从 ML 页面提取卖家地理位置"""
+    try:
+        # 页面底部或侧栏可能包含位置信息
+        body = await page.evaluate("document.body.innerText")
+        # 找 "São Paulo", "Minas Gerais", "Rio de Janeiro" 等州名 + SP/MG/RJ 缩写
+        patterns = [
+            (r'(?:em|no|na|de)\s+([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)\s*[-/,]?\s*(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)'),
+            (r'S[ãa]o\s+Paulo\s*[-/,]?\s*(?:SP)?'),
+            (r'Rio\s+de\s+Janeiro\s*[-/,]?\s*(?:RJ)?'),
+            (r'Belo\s+Horizonte\s*[-/,]?\s*(?:MG)?'),
+            (r'(?:Ubicación|Localização|Localizado)[^.]*?([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)\s*[-/,]?\s*(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)'),
+        ]
+        for pat in patterns:
+            m = re.search(pat, body, re.IGNORECASE)
+            if m:
+                groups = m.groups()
+                if 'São Paulo' in m.group(0) or (len(groups) >= 2 and groups[1] == 'SP'):
+                    return {"city": "São Paulo", "state": "SP"}
+                if len(groups) >= 2 and groups[1]:
+                    return {"city": groups[0].strip() if groups[0] else None, "state": groups[1]}
+    except Exception:
+        pass
+    return None
 
 
 async def _google_search_cnpj(page, seller_name: str) -> dict:
@@ -926,8 +928,15 @@ async def api_scrape(payload: ScrapeRequest):
             data = await _scrape_profile_page(page, identifier, payload.url)
 
         seller_name = data.get("seller_name") or ""
+        seller_id = data.get("seller_id")  # 已在上面赋值，这里只读
         is_alias = False
         logger.info(f"第一步完成: 卖家名 = {seller_name}")
+
+        # 提取卖家地理位置（从当前页面）
+        seller_location = await _extract_seller_location(page)
+        if seller_location:
+            data["location"] = seller_location
+            logger.info(f"卖家位置: {seller_location}")
 
         # ====== 第二步：Google 搜索反查 CNPJ + 联系方式 ======
         legal_info = {"cnpj": None, "razao_social": None, "source": None}
@@ -1015,11 +1024,21 @@ async def api_scrape(payload: ScrapeRequest):
                     elif ml_norm in razao_norm:
                         score = 60
                     else:
-                        # 看有多少共同词
                         ml_words = set(ml_norm.split())
                         razao_words = set(razao_norm.split())
                         common = ml_words & razao_words
                         score = len(common) * 10
+
+                    # 地理位置匹配加分/扣分
+                    seller_state = (seller_location or {}).get("state", "")
+                    cand_state = v.get("estado", "")
+                    if seller_state and cand_state:
+                        if seller_state == cand_state:
+                            score += 20  # 同州加分
+                            logger.info(f"  地理位置匹配: seller={seller_state}, CNPJ={cand_state}, +20")
+                        else:
+                            score -= 30  # 不同州扣分
+                            logger.info(f"  地理位置不匹配: seller={seller_state}, CNPJ={cand_state}, -30")
 
                     logger.info(f"  候选 {cand['cnpj']}: score={score}, fantasia={v.get('nome_fantasia','')}")
                     if score > best_score:
