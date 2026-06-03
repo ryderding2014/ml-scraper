@@ -488,24 +488,32 @@ async def _scrape_profile_page(page, nick: str, original_url: str = "") -> dict:
 async def _extract_seller_location(page) -> Optional[dict]:
     """从 ML 页面提取卖家地理位置"""
     try:
-        # 页面底部或侧栏可能包含位置信息
         body = await page.evaluate("document.body.innerText")
-        # 找 "São Paulo", "Minas Gerais", "Rio de Janeiro" 等州名 + SP/MG/RJ 缩写
-        patterns = [
-            (r'(?:em|no|na|de)\s+([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)\s*[-/,]?\s*(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)'),
-            (r'S[ãa]o\s+Paulo\s*[-/,]?\s*(?:SP)?'),
-            (r'Rio\s+de\s+Janeiro\s*[-/,]?\s*(?:RJ)?'),
-            (r'Belo\s+Horizonte\s*[-/,]?\s*(?:MG)?'),
-            (r'(?:Ubicación|Localização|Localizado)[^.]*?([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)\s*[-/,]?\s*(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)'),
-        ]
-        for pat in patterns:
-            m = re.search(pat, body, re.IGNORECASE)
-            if m:
-                groups = m.groups()
-                if 'São Paulo' in m.group(0) or (len(groups) >= 2 and groups[1] == 'SP'):
-                    return {"city": "São Paulo", "state": "SP"}
-                if len(groups) >= 2 and groups[1]:
-                    return {"city": groups[0].strip() if groups[0] else None, "state": groups[1]}
+
+        # 优先找明确的城市名
+        # São Paulo
+        if re.search(r'(?:São|Sao)\s+Paulo', body):
+            return {"city": "São Paulo", "state": "SP"}
+        # Rio de Janeiro
+        if re.search(r'Rio\s+de\s+Janeiro', body):
+            return {"city": "Rio de Janeiro", "state": "RJ"}
+        # Belo Horizonte
+        if re.search(r'Belo\s+Horizonte', body):
+            return {"city": "Belo Horizonte", "state": "MG"}
+
+        # 通用模式：城市名 + 州缩写，但必须是大写开头的真实地名
+        STATES = r'(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)'
+        m = re.search(
+            r'(?:em|no|na|de)\s+([A-ZÀ-Ú][a-zà-ú]+(?:\s+(?:das?|dos?|de|da)\s+)?(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)\s+-\s+' + STATES,
+            body
+        )
+        if m:
+            return {"city": m.group(1).strip(), "state": m.group(2)}
+
+        # 筛选面板中的 "Ubicación de retiro" 后面的城市
+        m = re.search(r'(?:Ubicación|Localização|retirada?)\s*(?:de|em)?\s*\n\s*([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)\s*\n\s*' + STATES, body)
+        if m:
+            return {"city": m.group(1).strip(), "state": m.group(2)}
     except Exception:
         pass
     return None
