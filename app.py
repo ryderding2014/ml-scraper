@@ -251,6 +251,12 @@ async def _create_context(pw):
             "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         },
     )
+    # Pre-set Brazil geo cookies (force Brazilian site)
+    await context.add_cookies([
+        {"name": "ml_geo", "value": "BR", "domain": ".mercadolivre.com.br", "path": "/"},
+        {"name": "site_id", "value": "MLB", "domain": ".mercadolivre.com.br", "path": "/"},
+        {"name": "locale", "value": "pt-BR", "domain": ".mercadolivre.com.br", "path": "/"},
+    ])
     await context.add_init_script(STEALTH_SCRIPT)
     return context, browser
 
