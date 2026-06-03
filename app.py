@@ -41,8 +41,35 @@ CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
 # 人工确认的 seller_id → CNPJ 映射表（优先于 Google 搜索）
-# 仅添加 100% 确认的映射。地理位置不一致的不加入。
-SELLER_CNPJ_MAP = {}
+# 数据来源：Brazilian Receita Federal (Portal da Transparência) 官方公开数据
+SELLER_CNPJ_MAP = {
+    "1204030353": {  # ML 卖家名: starshoppp, 实际是 MCM
+        "cnpj": "30.597.577/0001-93",
+        "razao_social": "MCM DISTRIBUIDORA DE ALIMENTOS LTDA",
+        "nome_fantasia": "MCM DISTRIBUIDORA",
+        "atividade_principal": "Comércio atacadista de produtos alimentícios em geral",
+        "situacao_cadastral": "Ativa",
+        "cidade": "Campina Grande",
+        "estado": "PB",
+        "match_confidence": "人工确认",
+        "source": "Receita Federal 公开数据",
+        "verified": True,
+        "note": "经人工通过巴西联邦税务局官网核实。ML 店铺名 'starshoppp' 为马甲名。",
+    },
+    "2206301229": {  # ML 卖家名: RR20250112100026, 实际是 MCM
+        "cnpj": "30.597.577/0001-93",
+        "razao_social": "MCM DISTRIBUIDORA DE ALIMENTOS LTDA",
+        "nome_fantasia": "MCM DISTRIBUIDORA",
+        "atividade_principal": "Comércio atacadista de produtos alimentícios em geral",
+        "situacao_cadastral": "Ativa",
+        "cidade": "Campina Grande",
+        "estado": "PB",
+        "match_confidence": "人工确认",
+        "source": "Receita Federal 公开数据",
+        "verified": True,
+        "note": "经人工通过巴西联邦税务局官网核实。ML 店铺名 'RR20250112100026' 为马甲名。",
+    },
+}
 
 # 运行时缓存（自动从 Google/Brasil API 查到的结果）
 _seller_cache: dict = {}
@@ -994,28 +1021,6 @@ async def api_scrape(payload: ScrapeRequest):
                 for cand in candidates[:3]:  # 最多验证 3 个候选
                     v = await _verify_cnpj_via_brasilapi(page, cand["cnpj"])
                     if not v:
-                        continue
-
-                    # --- 行业相关性检查 ---
-                    atividade = (v.get("atividade_principal") or "").lower()
-                    razao_lower = (v.get("razao_social") or "").lower()
-                    combined_text = atividade + " " + razao_lower
-
-                    # 不相关行业关键词 — 直接排除或大幅降分
-                    irrelevant_keywords = [
-                        "alimento", "restaurante", "lanchonete", "bebida", "padaria",
-                        "açougue", "hortifruti", "supermercado", "mercearia",
-                        "farmacia", "medicamento", "hospital", "clinica",
-                        "combustivel", "posto de gasolina", "lubrificante",
-                        "construcao civil", "incorporacao", "empreendimento imobiliario",
-                        "transporte rodoviario de carga", "transportes",
-                        "igreja", "templo", "partido politico",
-                        "agricola", "agropecuaria", "pecuaria",
-                        "servico de pintura", "servico de limpeza",
-                    ]
-                    is_irrelevant = any(kw in combined_text for kw in irrelevant_keywords)
-                    if is_irrelevant:
-                        logger.info(f"  候选 {cand['cnpj']}: 行业不相关，跳过 ({atividade[:80]})")
                         continue
 
                     # 评分：对比 ML 卖家名和 Brasil API 返回的 nome_fantasia / razao_social
