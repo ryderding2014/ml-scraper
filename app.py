@@ -13,6 +13,9 @@ import re
 import logging
 import tempfile
 import os
+import json as _json
+import time as _time
+import random as _random
 import asyncio
 from urllib.parse import urlparse, unquote, quote
 from typing import Optional
@@ -37,6 +40,19 @@ templates = Jinja2Templates(directory="templates")
 
 PAGE_TIMEOUT_MS = 30_000
 PAGE_SETTLE_MS = 5_000
+
+
+async def _simulate_human(page):
+    """模拟人类浏览行为：随机滚动 + 短暂停顿，避免被检测为机器人"""
+    try:
+        # 随机停顿 0.5-2 秒
+        await page.wait_for_timeout(_random.randint(500, 2000))
+        # 随机滚动页面
+        scroll_y = _random.randint(100, 500)
+        await page.evaluate(f"window.scrollBy(0, {scroll_y})")
+        await page.wait_for_timeout(_random.randint(300, 1000))
+    except Exception:
+        pass
 CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
@@ -73,6 +89,35 @@ SELLER_CNPJ_MAP = {
 
 # 运行时缓存（自动从 Google/Brasil API 查到的结果）
 _seller_cache: dict = {}
+
+# 持久化缓存文件路径
+_CACHE_FILE = os.path.join(tempfile.gettempdir(), "ml-seller-cache.json")
+
+# 请求冷却：最小间隔秒数
+_MIN_REQUEST_INTERVAL = 30
+_last_request_time = 0
+
+def _load_persistent_cache():
+    """从磁盘加载持久化缓存"""
+    global _seller_cache
+    try:
+        if os.path.exists(_CACHE_FILE):
+            with open(_CACHE_FILE, 'r', encoding='utf-8') as f:
+                _seller_cache = _json.load(f)
+            logger.info(f"加载持久化缓存: {len(_seller_cache)} 条")
+    except Exception:
+        pass
+
+def _save_persistent_cache():
+    """保存缓存到磁盘"""
+    try:
+        with open(_CACHE_FILE, 'w', encoding='utf-8') as f:
+            _json.dump(_seller_cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+# 启动时加载缓存
+_load_persistent_cache()
 
 
 class ScrapeRequest(BaseModel):
@@ -376,6 +421,7 @@ async def _scrape_seller_list_page(page, seller_id: str, original_url: str) -> d
     logger.info(f"访问卖家列表页: {original_url}")
     await page.goto(original_url, wait_until="networkidle", timeout=PAGE_TIMEOUT_MS)
     await page.wait_for_timeout(PAGE_SETTLE_MS)
+    await _simulate_human(page)
 
     block = await _detect_block(page)
     if block:
@@ -955,7 +1001,16 @@ async def api_scrape(payload: ScrapeRequest):
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e), "data": None})
 
+    # 请求冷却检查
+    global _last_request_time
+    elapsed = _time.time() - _last_request_time
+    if elapsed < _MIN_REQUEST_INTERVAL:
+        wait_time = int(_MIN_REQUEST_INTERVAL - elapsed)
+        logger.info(f"请求冷却中，等待 {wait_time} 秒...")
+        await asyncio.sleep(wait_time)
+
     context = None
+    browser = None
     try:
         pw = await async_playwright().start()
         context, browser = await _create_context(pw)
@@ -1102,11 +1157,13 @@ async def api_scrape(payload: ScrapeRequest):
 
                     # 存入缓存（下次同 seller_id 直接复用）
                     if seller_id and best_score >= 50:
+                        _save_persistent_cache()
                         _seller_cache[seller_id] = {
                             k: v for k, v in legal_info.items()
                             if k not in ("note", "source", "match_confidence", "cnpj_candidates")
                         }
                         _seller_cache[seller_id]["match_confidence"] = legal_info.get("match_confidence")
+                        _save_persistent_cache()
 
                 # ====== 第四步：官网/联系（轻量模式，只搜一次）======
                 razao = legal_info.get("razao_social", "")
@@ -1133,6 +1190,8 @@ async def api_scrape(payload: ScrapeRequest):
                             legal_info["endereco"] = legal_info.get("endereco") or verified2.get("endereco")
                             legal_info["verified"] = True
                             legal_info["match_confidence"] = "二次验证"
+
+        _last_request_time = _time.time()
 
         # 拼装最终数据
         data["legal_info"] = legal_info
@@ -1164,6 +1223,7 @@ async def api_scrape(payload: ScrapeRequest):
             data["legal_info"]["note"] = f"{conf_note} {base}" if conf_note else base
 
         await context.close()
+        await browser.close()
         await pw.stop()
         return {"error": None, "data": data}
 
