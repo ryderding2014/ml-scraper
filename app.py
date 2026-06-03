@@ -35,8 +35,8 @@ logger = logging.getLogger("ml-scraper")
 app = FastAPI(title="ML Seller Snapshot + CNPJ")
 templates = Jinja2Templates(directory="templates")
 
-PAGE_TIMEOUT_MS = 20_000
-PAGE_SETTLE_MS = 2_500
+PAGE_TIMEOUT_MS = 30_000
+PAGE_SETTLE_MS = 5_000
 CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 ML_OWN_CNPJ = "03.007.331/0001-41"
 
@@ -222,9 +222,8 @@ _USER_DATA_DIR = os.path.join(tempfile.gettempdir(), "ml-scraper-profile")
 
 
 async def _create_context(pw):
-    os.makedirs(_USER_DATA_DIR, exist_ok=True)
-    context = await pw.chromium.launch_persistent_context(
-        user_data_dir=_USER_DATA_DIR,
+    """Create a fresh non-persistent context each time (avoids ML bot detection)."""
+    browser = await pw.chromium.launch(
         headless=True,
         args=[
             "--disable-blink-features=AutomationControlled",
@@ -232,10 +231,11 @@ async def _create_context(pw):
             "--disable-setuid-sandbox", "--no-first-run",
             "--disable-default-apps", "--disable-infobars",
             "--disable-background-networking", "--disable-sync",
-            # 内存优化
             "--disable-features=TranslateUI",
             "--disable-extensions",
         ],
+    )
+    context = await browser.new_context(
         viewport={"width": 1366, "height": 768},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -247,10 +247,12 @@ async def _create_context(pw):
         geolocation={"latitude": -23.5505, "longitude": -46.6333},
         permissions=["geolocation"],
         ignore_https_errors=True,
+        extra_http_headers={
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        },
     )
     await context.add_init_script(STEALTH_SCRIPT)
-    return context
-
+    return context, browser
 
 # =========================================================================
 # 第一步：从 ML 商品页提取卖家信息
@@ -950,7 +952,7 @@ async def api_scrape(payload: ScrapeRequest):
     context = None
     try:
         pw = await async_playwright().start()
-        context = await _create_context(pw)
+        context, browser = await _create_context(pw)
         page = await context.new_page()
 
         # ====== 第一步：从 ML 提取卖家信息 ======
