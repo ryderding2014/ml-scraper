@@ -306,6 +306,76 @@ async def _create_context(pw):
     return context, browser
 
 # =========================================================================
+# ML 公开 API（无需认证，不被封）
+# =========================================================================
+
+
+def _ml_api_get(path: str) -> Optional[dict]:
+    """调用 Mercado Libre 公开 API"""
+    url = f"https://api.mercadolibre.com{path}"
+    try:
+        req = _urllib.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        })
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        resp = _urllib.urlopen(req, timeout=10, context=ctx)
+        return _json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning(f"ML API 失败 ({path}): {e}")
+        return None
+
+
+async def _extract_seller_via_api(page, mlb_id: str) -> Optional[dict]:
+    """
+    通过 ML 公开 API 获取卖家信息（无需浏览器，不被封）。
+    返回卖家名、seller_id 等，失败则返回 None 回退到 Playwright。
+    """
+    # Step 1: 从 item API 获取 seller_id
+    item = _ml_api_get(f"/items/{mlb_id}")
+    if not item or "seller_id" not in item:
+        return None
+
+    seller_id = str(item["seller_id"])
+    seller_name = item.get("seller", {}).get("nickname", "") if isinstance(item.get("seller"), dict) else ""
+
+    if not seller_name:
+        # Step 2: 从 users API 获取卖家昵称
+        user = _ml_api_get(f"/users/{seller_id}")
+        if user:
+            seller_name = user.get("nickname", "")
+
+    if not seller_id:
+        return None
+
+    logger.info(f"ML API 获取卖家: {seller_name} (ID: {seller_id})")
+
+    # 基础信誉数据（API 返回有限，详细数据仍需要 Playwright）
+    reputation = {}
+    if isinstance(item.get("seller"), dict):
+        seller_data = item["seller"]
+        if seller_data.get("seller_reputation"):
+            rep = seller_data["seller_reputation"]
+            level = rep.get("level_id", "")
+            if level:
+                reputation["level"] = level.replace("_", " ").title()
+            if rep.get("transactions", {}).get("total"):
+                reputation["sales"] = f"{rep['transactions']['total']} Vendas"
+
+    return {
+        "seller_name": seller_name,
+        "seller_id": seller_id,
+        "store_url": f"https://perfil.mercadolivre.com.br/{seller_name}",
+        "profile_url": f"https://perfil.mercadolivre.com.br/{seller_name}",
+        "profile_nick": seller_name,
+        "reputation": reputation,
+        "source": "ML 公开 API",
+    }
+
+
+# =========================================================================
 # 第一步：从 ML 商品页提取卖家信息
 # =========================================================================
 
@@ -1018,7 +1088,12 @@ async def api_scrape(payload: ScrapeRequest):
 
         # ====== 第一步：从 ML 提取卖家信息 ======
         if url_type == "product":
-            data = await _extract_seller_from_product(page, identifier, payload.url)
+            # 优先 ML API（不触发反爬），失败回退 Playwright
+            data = await _extract_seller_via_api(page, identifier)
+            if data:
+                logger.info("API 获取成功，跳过浏览器")
+            else:
+                data = await _extract_seller_from_product(page, identifier, payload.url)
         elif url_type == "seller_list":
             # _CustId_ URL：访问列表页获取卖家名，再走正常流程
             data = await _scrape_seller_list_page(page, identifier, payload.url)
